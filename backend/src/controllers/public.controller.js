@@ -1,13 +1,21 @@
 const os = require("os");
+const crypto = require("crypto");
 const { nanoid } = require("nanoid");
 
-function createPublicController({
-  config,
-  redis,
-  resend,
-  spamService,
-  forwardingService,
-}) {
+function createPublicController({ config, redis, resend, spamService, forwardingService, broadcastToUser }) {
+  const checkLockAccess = async (email, req, res) => {
+    const locked = await redis.exists(`lock:${email}`);
+    if (!locked) return true;
+    const token = req.headers["x-unlock-token"];
+    if (!token) {
+      return res.status(403).json({ success: false, error: "This email is locked. Unlock it first." });
+    }
+    const data = await redis.get(`unlock:${email}`);
+    if (!data || JSON.parse(data).token !== token) {
+      return res.status(403).json({ success: false, error: "This email is locked. Unlock it first." });
+    }
+    return true;
+  };
   const generate = async (req, res) => {
     try {
       const chars = "abcdefghjkmnpqrstuvwxyz23456789";
@@ -28,15 +36,11 @@ function createPublicController({
         config.INBOX_TTL,
       );
 
-      const expiresAt = new Date(
-        Date.now() + config.INBOX_TTL * 1000,
-      ).toISOString();
+      const expiresAt = new Date(Date.now() + config.INBOX_TTL * 1000).toISOString();
       res.json({ success: true, email, expiresAt, ttl: config.INBOX_TTL });
     } catch (error) {
       console.error("Error generating email:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to generate email" });
+      res.status(500).json({ success: false, error: "Failed to generate email" });
     }
   };
 
@@ -45,10 +49,7 @@ function createPublicController({
       const localPart = req.params.localPart.toLowerCase().trim();
 
       if (!localPart || localPart.length < 3 || localPart.length > 20) {
-        return res.json({
-          available: false,
-          error: "Handle must be 3-20 characters",
-        });
+        return res.json({ available: false, error: "Handle must be 3-20 characters" });
       }
 
       if (!/^[a-z0-9._-]+$/.test(localPart)) {
@@ -60,12 +61,11 @@ function createPublicController({
 
       const email = `${localPart}@${config.EMAIL_DOMAIN}`;
       const exists = await redis.exists(`email:${email}`);
-      res.json({ available: !exists, email });
+      const locked = await redis.exists(`lock:${email}`);
+      res.json({ available: !exists && !locked, email });
     } catch (error) {
       console.error("Error checking email:", error);
-      res
-        .status(500)
-        .json({ available: false, error: "Failed to check availability" });
+      res.status(500).json({ available: false, error: "Failed to check availability" });
     }
   };
 
@@ -74,14 +74,8 @@ function createPublicController({
       const { localPart, ttlMinutes } = req.body;
       const cleanLocalPart = (localPart || "").toLowerCase().trim();
 
-      if (
-        !cleanLocalPart ||
-        cleanLocalPart.length < 3 ||
-        cleanLocalPart.length > 20
-      ) {
-        return res
-          .status(400)
-          .json({ success: false, error: "Handle must be 3-20 characters" });
+      if (!cleanLocalPart || cleanLocalPart.length < 3 || cleanLocalPart.length > 20) {
+        return res.status(400).json({ success: false, error: "Handle must be 3-20 characters" });
       }
 
       if (!/^[a-z0-9._-]+$/.test(cleanLocalPart)) {
@@ -102,12 +96,7 @@ function createPublicController({
 
       const exists = await redis.exists(emailKey);
       if (exists) {
-        return res
-          .status(409)
-          .json({
-            success: false,
-            error: "This email handle is already taken",
-          });
+        return res.status(409).json({ success: false, error: "This email handle is already taken" });
       }
 
       const emailData = JSON.stringify({
@@ -123,9 +112,7 @@ function createPublicController({
         await redis.set(emailKey, emailData, "EX", ttlSeconds);
       }
 
-      const expiresAt = isPermanent
-        ? null
-        : new Date(Date.now() + ttlSeconds * 1000).toISOString();
+      const expiresAt = isPermanent ? null : new Date(Date.now() + ttlSeconds * 1000).toISOString();
 
       res.json({
         success: true,
@@ -136,15 +123,15 @@ function createPublicController({
       });
     } catch (error) {
       console.error("Error creating custom email:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to create custom email" });
+      res.status(500).json({ success: false, error: "Failed to create custom email" });
     }
   };
 
   const getInbox = async (req, res) => {
     try {
       const email = req.params.email.toLowerCase();
+      if (!(await checkLockAccess(email, req, res))) return;
+
       const inboxKey = `inbox:${email}`;
       const emailKey = `email:${email}`;
 
@@ -169,34 +156,32 @@ function createPublicController({
   const refreshEmail = async (req, res) => {
     try {
       const email = req.params.email.toLowerCase();
+      if (!(await checkLockAccess(email, req, res))) return;
+
       const emailKey = `email:${email}`;
       const inboxKey = `inbox:${email}`;
 
       const exists = await redis.exists(emailKey);
       if (!exists) {
-        return res
-          .status(404)
-          .json({ success: false, error: "Email not found or expired" });
+        return res.status(404).json({ success: false, error: "Email not found or expired" });
       }
 
       await redis.expire(emailKey, config.INBOX_TTL);
       await redis.expire(inboxKey, config.INBOX_TTL);
 
-      const expiresAt = new Date(
-        Date.now() + config.INBOX_TTL * 1000,
-      ).toISOString();
+      const expiresAt = new Date(Date.now() + config.INBOX_TTL * 1000).toISOString();
       res.json({ success: true, email, expiresAt, ttl: config.INBOX_TTL });
     } catch (error) {
       console.error("Error refreshing email:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to refresh email" });
+      res.status(500).json({ success: false, error: "Failed to refresh email" });
     }
   };
 
   const deleteInboxEmail = async (req, res) => {
     try {
       const email = req.params.email.toLowerCase();
+      if (!(await checkLockAccess(email, req, res))) return;
+
       const emailId = req.params.emailId;
       const inboxKey = `inbox:${email}`;
 
@@ -219,15 +204,18 @@ function createPublicController({
   const releaseEmail = async (req, res) => {
     try {
       const email = req.params.email.toLowerCase();
+      if (!(await checkLockAccess(email, req, res))) return;
+
       await redis.del(`email:${email}`);
       await redis.del(`inbox:${email}`);
       await redis.del(`sent:${email}`);
+      await redis.del(`lock:${email}`);
+      await redis.del(`unlock:${email}`);
+      await redis.del(`pinattempts:${email}`);
       res.json({ success: true, message: "Email released" });
     } catch (error) {
       console.error("Error releasing email:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to release email" });
+      res.status(500).json({ success: false, error: "Failed to release email" });
     }
   };
 
@@ -260,10 +248,10 @@ function createPublicController({
         });
       }
 
+      if (!(await checkLockAccess(fromLower, req, res))) return;
+
       if (!resend) {
-        return res
-          .status(500)
-          .json({ success: false, error: "Email sending not configured" });
+        return res.status(500).json({ success: false, error: "Email sending not configured" });
       }
 
       const resendAttachments = (attachments || []).map((att) => ({
@@ -278,17 +266,11 @@ function createPublicController({
         subject,
         text: text || "",
         html: html || undefined,
-        attachments:
-          resendAttachments.length > 0 ? resendAttachments : undefined,
+        attachments: resendAttachments.length > 0 ? resendAttachments : undefined,
       });
 
       if (error) {
-        return res
-          .status(500)
-          .json({
-            success: false,
-            error: error.message || "Failed to send email",
-          });
+        return res.status(500).json({ success: false, error: error.message || "Failed to send email" });
       }
 
       const sentKey = `sent:${fromLower}`;
@@ -307,11 +289,7 @@ function createPublicController({
         await redis.expire(sentKey, emailTtl);
       }
 
-      res.json({
-        success: true,
-        messageId: data.id,
-        message: "Email sent successfully",
-      });
+      res.json({ success: true, messageId: data.id, message: "Email sent successfully" });
     } catch (error) {
       console.error("Error sending email:", error);
       res.status(500).json({ success: false, error: "Failed to send email" });
@@ -321,23 +299,18 @@ function createPublicController({
   const getSentEmails = async (req, res) => {
     try {
       const email = req.params.email.toLowerCase();
+      if (!(await checkLockAccess(email, req, res))) return;
+
       const sentKey = `sent:${email}`;
 
       const emails = await redis.lrange(sentKey, 0, -1);
       const parsedEmails = emails.map((e) => JSON.parse(e));
       parsedEmails.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-      res.json({
-        success: true,
-        email,
-        count: parsedEmails.length,
-        messages: parsedEmails,
-      });
+      res.json({ success: true, email, count: parsedEmails.length, messages: parsedEmails });
     } catch (error) {
       console.error("Error fetching sent:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to fetch sent emails" });
+      res.status(500).json({ success: false, error: "Failed to fetch sent emails" });
     }
   };
 
@@ -362,7 +335,19 @@ function createPublicController({
         percentage: ((usedMem / totalMem) * 100).toFixed(1),
       },
       uptime: Math.floor(os.uptime()),
+      serverTime: new Date().toISOString(),
+      version: require("../../package.json").version || "1.0.0",
     });
+  };
+
+  const recordVisit = async (req, res) => {
+    try {
+      const count = await redis.incr("visits");
+      res.json({ success: true, visits: count });
+    } catch (error) {
+      console.error("Error recording visit:", error);
+      res.status(500).json({ success: false, error: "Failed to record visit" });
+    }
   };
 
   const getActiveHandles = async (req, res) => {
@@ -370,35 +355,26 @@ function createPublicController({
       const cursor = req.query.cursor || "0";
       const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
 
-      const [nextCursor, keys] = await redis.scan(
-        cursor,
-        "MATCH",
-        "email:*",
-        "COUNT",
-        limit * 2,
-      );
+      const [nextCursor, keys] = await redis.scan(cursor, "MATCH", "email:*", "COUNT", limit * 2);
       const emailKeys = keys
-        .filter(
-          (key) =>
-            key.startsWith("email:") &&
-            !key.includes(":inbox:") &&
-            !key.includes(":sent:"),
-        )
+        .filter((key) => key.startsWith("email:") && !key.includes(":inbox:") && !key.includes(":sent:"))
         .slice(0, limit);
 
       const pipeline = redis.pipeline();
       emailKeys.forEach((key) => {
         pipeline.ttl(key);
         pipeline.get(key);
+        pipeline.exists(key.replace("email:", "lock:"));
       });
       const results = await pipeline.exec();
 
       const handles = [];
       for (let i = 0; i < emailKeys.length; i++) {
-        const ttl = results[i * 2][1];
-        const dataStr = results[i * 2 + 1][1];
+        const ttl = results[i * 3][1];
+        const dataStr = results[i * 3 + 1][1];
+        const isLocked = results[i * 3 + 2][1];
 
-        if (ttl !== -2 && dataStr) {
+        if (ttl !== -2 && dataStr && !isLocked) {
           try {
             const data = JSON.parse(dataStr);
             const email = emailKeys[i].replace("email:", "");
@@ -427,9 +403,7 @@ function createPublicController({
       });
     } catch (error) {
       console.error("Error fetching active handles:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to fetch handles" });
+      res.status(500).json({ success: false, error: "Failed to fetch handles" });
     }
   };
 
@@ -439,16 +413,8 @@ function createPublicController({
       let count = 0;
 
       do {
-        const [nextCursor, keys] = await redis.scan(
-          cursor,
-          "MATCH",
-          "email:*@*",
-          "COUNT",
-          1000,
-        );
-        count += keys.filter(
-          (k) => !k.includes(":inbox:") && !k.includes(":sent:"),
-        ).length;
+        const [nextCursor, keys] = await redis.scan(cursor, "MATCH", "email:*@*", "COUNT", 1000);
+        count += keys.filter((k) => !k.includes(":inbox:") && !k.includes(":sent:")).length;
         cursor = nextCursor;
       } while (cursor !== "0");
 
@@ -462,12 +428,12 @@ function createPublicController({
   const getForwarding = async (req, res) => {
     try {
       const email = req.params.email.toLowerCase();
+      if (!(await checkLockAccess(email, req, res))) return;
+
       const emailDataStr = await redis.get(`email:${email}`);
 
       if (!emailDataStr) {
-        return res
-          .status(404)
-          .json({ success: false, error: "Email not found" });
+        return res.status(404).json({ success: false, error: "Email not found" });
       }
 
       const emailData = JSON.parse(emailDataStr);
@@ -485,14 +451,14 @@ function createPublicController({
   const updateForwarding = async (req, res) => {
     try {
       const email = req.params.email.toLowerCase();
+      if (!(await checkLockAccess(email, req, res))) return;
+
       const { forwardEnabled, forwardTo } = req.body;
       const emailKey = `email:${email}`;
 
       const emailDataStr = await redis.get(emailKey);
       if (!emailDataStr) {
-        return res
-          .status(404)
-          .json({ success: false, error: "Email not found" });
+        return res.status(404).json({ success: false, error: "Email not found" });
       }
 
       const emailData = JSON.parse(emailDataStr);
@@ -500,14 +466,10 @@ function createPublicController({
       if (forwardEnabled && forwardTo) {
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(forwardTo)) {
-          return res
-            .status(400)
-            .json({ success: false, error: "Invalid email format" });
+          return res.status(400).json({ success: false, error: "Invalid email format" });
         }
         if (forwardTo.endsWith(`@${config.EMAIL_DOMAIN}`)) {
-          return res
-            .status(400)
-            .json({ success: false, error: "Cannot forward to this domain" });
+          return res.status(400).json({ success: false, error: "Cannot forward to this domain" });
         }
       }
 
@@ -528,9 +490,7 @@ function createPublicController({
       });
     } catch (error) {
       console.error("Error updating forwarding settings:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to update settings" });
+      res.status(500).json({ success: false, error: "Failed to update settings" });
     }
   };
 
@@ -539,13 +499,14 @@ function createPublicController({
       const { email, messageId, isSpam } = req.body;
 
       if (!email || !messageId || typeof isSpam !== "boolean") {
-        return res
-          .status(400)
-          .json({ success: false, error: "Invalid request" });
+        return res.status(400).json({ success: false, error: "Invalid request" });
       }
 
-      const inboxKey = `inbox:${email.toLowerCase()}`;
-      const feedbackKey = `feedback:${email.toLowerCase()}`;
+      const emailLower = email.toLowerCase();
+      if (!(await checkLockAccess(emailLower, req, res))) return;
+
+      const inboxKey = `inbox:${emailLower}`;
+      const feedbackKey = `feedback:${emailLower}`;
 
       const messages = await redis.lrange(inboxKey, 0, -1);
       let foundMessage = null;
@@ -561,9 +522,7 @@ function createPublicController({
       }
 
       if (!foundMessage) {
-        return res
-          .status(404)
-          .json({ success: false, error: "Message not found" });
+        return res.status(404).json({ success: false, error: "Message not found" });
       }
 
       const feedback = {
@@ -588,9 +547,7 @@ function createPublicController({
       res.json({ success: true, trained, wasCorrect: feedback.wasCorrect });
     } catch (error) {
       console.error("Error processing feedback:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to process feedback" });
+      res.status(500).json({ success: false, error: "Failed to process feedback" });
     }
   };
 
@@ -608,10 +565,7 @@ function createPublicController({
         incorrect: parsed.filter((f) => !f.wasCorrect).length,
         accuracy:
           parsed.length > 0
-            ? (
-                (parsed.filter((f) => f.wasCorrect).length / parsed.length) *
-                100
-              ).toFixed(1)
+            ? ((parsed.filter((f) => f.wasCorrect).length / parsed.length) * 100).toFixed(1)
             : 0,
       };
 
@@ -622,19 +576,108 @@ function createPublicController({
     }
   };
 
+  const lockEmail = async (req, res) => {
+    try {
+      const { email, pin } = req.body;
+      const emailLower = (email || "").toLowerCase().trim();
+
+      if (!emailLower || !/^[a-z0-9._-]+@[a-z0-9._-]+\.[a-z]{2,}$/.test(emailLower)) {
+        return res.status(400).json({ success: false, error: "Invalid email address" });
+      }
+      if (!pin || !/^\d{6}$/.test(pin)) {
+        return res.status(400).json({ success: false, error: "PIN must be exactly 6 digits" });
+      }
+
+      const emailExists = await redis.exists(`email:${emailLower}`);
+      if (!emailExists) {
+        return res.status(404).json({ success: false, error: "Email not found" });
+      }
+
+      const alreadyLocked = await redis.exists(`lock:${emailLower}`);
+      if (alreadyLocked) {
+        return res.status(409).json({ success: false, error: "This email is already locked" });
+      }
+
+      const salt = crypto.randomBytes(16).toString("hex");
+      const pinHash = crypto.createHash("sha256").update(salt + pin).digest("hex");
+      const unlockToken = crypto.randomBytes(32).toString("hex");
+
+      const lockData = JSON.stringify({ pinHash, salt, lockedAt: new Date().toISOString() });
+      const unlockData = JSON.stringify({ token: unlockToken });
+
+      const emailTtl = await redis.ttl(`email:${emailLower}`);
+      if (emailTtl > 0) {
+        await redis.set(`lock:${emailLower}`, lockData, "EX", emailTtl);
+      } else {
+        await redis.set(`lock:${emailLower}`, lockData);
+      }
+      await redis.set(`unlock:${emailLower}`, unlockData, "EX", config.UNLOCK_TOKEN_TTL);
+
+      res.json({ success: true, unlockToken });
+    } catch (error) {
+      console.error("Error locking email:", error);
+      res.status(500).json({ success: false, error: "Failed to lock email" });
+    }
+  };
+
+  const unlockEmail = async (req, res) => {
+    try {
+      const { email, pin } = req.body;
+      const emailLower = (email || "").toLowerCase().trim();
+
+      if (!emailLower || !pin || !/^\d{6}$/.test(pin)) {
+        return res.status(400).json({ success: false, error: "Invalid request" });
+      }
+
+      const lockDataStr = await redis.get(`lock:${emailLower}`);
+      if (!lockDataStr) {
+        return res.status(400).json({ success: false, error: "This email is not locked" });
+      }
+
+      const lockData = JSON.parse(lockDataStr);
+      const pinHash = crypto.createHash("sha256").update(lockData.salt + pin).digest("hex");
+
+      if (pinHash !== lockData.pinHash) {
+        return res.status(401).json({ success: false, error: "Incorrect PIN" });
+      }
+
+      await redis.del(`pinattempts:${emailLower}`);
+
+      const unlockToken = crypto.randomBytes(32).toString("hex");
+      const unlockData = JSON.stringify({ token: unlockToken });
+      await redis.set(`unlock:${emailLower}`, unlockData, "EX", config.UNLOCK_TOKEN_TTL);
+
+      res.json({ success: true, unlockToken, email: emailLower });
+    } catch (error) {
+      console.error("Error unlocking email:", error);
+      res.status(500).json({ success: false, error: "Failed to unlock email" });
+    }
+  };
+
+  const verifyUnlock = async (req, res) => {
+    try {
+      const { email } = req.body;
+      const emailLower = (email || "").toLowerCase().trim();
+
+      if (!emailLower) {
+        return res.status(400).json({ success: false, error: "Email required" });
+      }
+
+      const isLocked = await redis.exists(`lock:${emailLower}`);
+      res.json({ success: true, isLocked: !!isLocked });
+    } catch (error) {
+      console.error("Error verifying unlock:", error);
+      res.status(500).json({ success: false, error: "Failed to verify" });
+    }
+  };
+
   const processIncomingEmail = async ({ emailData, session }) => {
     try {
       const { simpleParser } = require("mailparser");
       const parsed = await simpleParser(emailData);
       const senderIP = session.remoteAddress || "";
-      const spamResult = await spamService.checkSpam(
-        emailData,
-        parsed,
-        senderIP,
-      );
-      const recipients = session.envelope.rcptTo.map((r) =>
-        r.address.toLowerCase(),
-      );
+      const spamResult = await spamService.checkSpam(emailData, parsed, senderIP);
+      const recipients = session.envelope.rcptTo.map((r) => r.address.toLowerCase());
 
       const emailObj = {
         id: nanoid(10),
@@ -667,11 +710,7 @@ function createPublicController({
           const emailSettings = JSON.parse(emailDataStr);
           const isSafeToForward = spamResult.score < config.FORWARD_THRESHOLD;
 
-          if (
-            emailSettings.forwardEnabled &&
-            emailSettings.forwardTo &&
-            isSafeToForward
-          ) {
+          if (emailSettings.forwardEnabled && emailSettings.forwardTo && isSafeToForward) {
             wasForwarded = await forwardingService.forwardEmail({
               resend,
               config,
@@ -681,10 +720,10 @@ function createPublicController({
           }
         }
 
-        await redis.lpush(
-          inboxKey,
-          JSON.stringify({ ...emailObj, forwarded: wasForwarded }),
-        );
+        await redis.lpush(inboxKey, JSON.stringify({ ...emailObj, forwarded: wasForwarded }));
+
+        // Notify connected clients about new email
+        broadcastToUser(recipient, { type: "new-email", data: { id: emailObj.id, from: emailObj.from, subject: emailObj.subject, date: emailObj.date } });
       }
     } catch (error) {
       throw error;
@@ -702,12 +741,16 @@ function createPublicController({
     sendEmail,
     getSentEmails,
     getSystemStats,
+    recordVisit,
     getActiveHandles,
     getActiveCount,
     getForwarding,
     updateForwarding,
     submitSpamFeedback,
     getSpamStats,
+    lockEmail,
+    unlockEmail,
+    verifyUnlock,
     processIncomingEmail,
   };
 }

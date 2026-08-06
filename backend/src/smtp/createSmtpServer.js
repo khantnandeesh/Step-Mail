@@ -1,10 +1,30 @@
+const fs = require("fs");
 const { SMTPServer } = require("smtp-server");
 
+function loadTlsCerts(config) {
+  try {
+    const keyPath = config.TLS_KEY_PATH;
+    const certPath = config.TLS_CERT_PATH;
+    if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+      return {
+        key: fs.readFileSync(keyPath),
+        cert: fs.readFileSync(certPath),
+      };
+    }
+  } catch (e) {
+    // Certs not available – STARTTLS will be unavailable
+  }
+  return {};
+}
+
 function createSmtpServer({ config, processIncomingEmail, addLog }) {
+  const tlsCerts = loadTlsCerts(config);
+
   const smtpServer = new SMTPServer({
     authOptional: true,
     disabledCommands: ["AUTH"],
     secure: false,
+    ...tlsCerts,
 
     onConnect(session, callback) {
       addLog("info", "SMTP connection", { ip: session.remoteAddress });
