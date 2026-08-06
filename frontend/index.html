@@ -2,12 +2,90 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18008140902"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      window.addEventListener('load', function () {
+        gtag('js', new Date());
+        gtag('config', 'AW-18008140902');
+      });
+    </script>
+    
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+
+    <!-- Primary SEO -->
+    <title>StepMail — Free Temporary Email | Disposable Email Address</title>
+    <meta
+      name="description"
+      content="Create a free temporary email address instantly with StepMail. Receive disposable emails, protect your inbox from spam, and use private email handles with no signup."
+    />
+    <meta
+      name="keywords"
+      content="temp mail, temporary email, disposable email, fake email, anonymous email, throwaway email, 10 minute mail, free email, stepmail"
+    />
+    <meta name="author" content="StepMail" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <link rel="canonical" href="https://stepmail.tech/" />
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://stepmail.tech/" />
+    <meta
+      property="og:title"
+      content="StepMail — Free Temporary Email | Disposable Email Address"
+    />
+    <meta
+      property="og:description"
+      content="Create a free temporary email address instantly. Receive disposable emails, protect your inbox, and avoid spam with StepMail."
+    />
+    <meta property="og:image" content="https://stepmail.tech/og-image.svg" />
+    <meta property="og:site_name" content="StepMail" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="https://stepmail.tech/" />
+    <meta name="twitter:title" content="StepMail — Free Temporary Email" />
+    <meta
+      name="twitter:description"
+      content="Create a free temporary email address instantly. No signup, no spam."
+    />
+    <meta name="twitter:image" content="https://stepmail.tech/og-image.svg" />
+
+    <!-- Additional SEO -->
+    <meta name="theme-color" content="#0a246a" />
+    <meta name="apple-mobile-web-app-title" content="StepMail" />
+
+    <!-- Structured Data for Rich Results -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "StepMail",
+        "url": "https://stepmail.tech",
+        "description": "Free temporary email service for creating disposable email addresses instantly with no signup required.",
+        "applicationCategory": "UtilityApplication",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    </script>
+    <link rel="stylesheet" href="/src/index.css" />
   </head>
   <body>
     <div id="root"></div>
+
+    <noscript>
+      StepMail is a free temporary email service for creating disposable email addresses instantly.
+      Enable JavaScript to create an address, receive mail, search messages, and manage forwarding.
+    </noscript>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
