@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import './App.css';
+import { useUserWebSocket } from './useWebSocket';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
 
@@ -9,6 +10,8 @@ function App() {
   const [sentMessages, setSentMessages] = useState([]);
   const [activeTab, setActiveTab] = useState('inbox'); // 'inbox' or 'sent'
   const [selectedMessage, setSelectedMessage] = useState(null);
+  const [mailSearch, setMailSearch] = useState('');
+  const [messageCopied, setMessageCopied] = useState(false);
   const [ttl, setTtl] = useState(0);
   const [loading, setLoading] = useState(false);
   const [copying, setCopying] = useState(false);
@@ -38,6 +41,68 @@ function App() {
   const [forwardingSaving, setForwardingSaving] = useState(false);
   const [forwardingError, setForwardingError] = useState('');
   const [forwardingSuccess, setForwardingSuccess] = useState(false);
+
+  // Service status
+  const [serviceStatus, setServiceStatus] = useState('on');
+
+  // Lock/Unlock states
+  const [landingTab, setLandingTab] = useState('new');
+  const [unlockEmailInput, setUnlockEmailInput] = useState('');
+  const [unlockPinDigits, setUnlockPinDigits] = useState(['', '', '', '', '', '']);
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockError, setUnlockError] = useState('');
+  const [showLockModal, setShowLockModal] = useState(false);
+  const [lockPinDigits, setLockPinDigits] = useState(['', '', '', '', '', '']);
+  const [lockConfirmDigits, setLockConfirmDigits] = useState(['', '', '', '', '', '']);
+  const [activePinField, setActivePinField] = useState('pin'); // 'pin' or 'confirm'
+  const [locking, setLocking] = useState(false);
+  const [lockError, setLockError] = useState('');
+  const [isLocked, setIsLocked] = useState(false);
+
+  const handlePinDigit = (field, index, value) => {
+    const digit = value.replace(/\D/g, '').slice(-1);
+    const setter = field === 'pin' ? setLockPinDigits : setLockConfirmDigits;
+    setter(prev => {
+      const next = [...prev];
+      next[index] = digit;
+      return next;
+    });
+    setLockError('');
+    // Auto-advance to next box
+    if (digit && index < 5) {
+      const nextId = `${field}-${index + 1}`;
+      document.getElementById(nextId)?.focus();
+    }
+  };
+
+  const handlePinKeyDown = (field, index, e) => {
+    if (e.key === 'Backspace' && !lockPinDigits[index] && lockConfirmDigits[index] === '' && index > 0) {
+      // Move to previous box on backspace if empty
+      const prevId = `${field}-${index - 1}`;
+      document.getElementById(prevId)?.focus();
+    }
+  };
+
+  const handlePinPaste = (field, index, e) => {
+    e.preventDefault();
+    const pasted = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '').slice(0, 6);
+    if (!pasted) return;
+    const setter = field === 'pin' ? setLockPinDigits : setLockConfirmDigits;
+    setter(prev => {
+      const next = [...prev];
+      for (let i = 0; i < pasted.length && index + i < 6; i++) {
+        next[index + i] = pasted[i];
+      }
+      return next;
+    });
+    setLockError('');
+    // Focus the box after the last pasted digit
+    const focusIndex = Math.min(index + pasted.length, 5);
+    const focusId = `${field}-${focusIndex}`;
+    document.getElementById(focusId)?.focus();
+  };
+
+  const getPinValue = (digits) => digits.join('');
 
   const checkAvailability = async (handle) => {
     if (!handle || handle.length < 3) {
@@ -152,7 +217,7 @@ function App() {
 
       const res = await fetch(`${API_URL}/api/send`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           from: email,
           fromName: composeName.trim() || 'StepMail',
@@ -203,10 +268,45 @@ function App() {
     setLoading(false);
   };
 
+  const getUnlockedEmails = () => {
+    try {
+      return JSON.parse(localStorage.getItem('unlockedEmails') || '{}');
+    } catch {
+      return {};
+    }
+  };
+
+  const getAuthHeaders = () => {
+    if (isLocked && email) {
+      const unlocked = getUnlockedEmails();
+      const token = unlocked[email];
+      if (token) return { 'X-Unlock-Token': token };
+    }
+    return {};
+  };
+
+  const handleLockedResponse = (status) => {
+    if (status === 403) {
+      const unlocked = getUnlockedEmails();
+      delete unlocked[email];
+      localStorage.setItem('unlockedEmails', JSON.stringify(unlocked));
+      setIsLocked(false);
+      setEmail(null);
+      setMessages([]);
+      setSentMessages([]);
+      setSelectedMessage(null);
+      setLandingTab('unlock');
+      setUnlockEmailInput(email || '');
+    }
+  };
+
   const fetchInbox = useCallback(async () => {
     if (!email) return;
     try {
-      const res = await fetch(`${API_URL}/api/inbox/${encodeURIComponent(email)}`);
+      const res = await fetch(`${API_URL}/api/inbox/${encodeURIComponent(email)}`, {
+        headers: getAuthHeaders(),
+      });
+      if (res.status === 403) { handleLockedResponse(403); return; }
       const data = await res.json();
       if (data.success) {
         setMessages(data.messages);
@@ -215,12 +315,15 @@ function App() {
     } catch (error) {
       console.error('Failed to fetch inbox:', error);
     }
-  }, [email]);
+  }, [email, isLocked]);
 
   const fetchSent = useCallback(async () => {
     if (!email) return;
     try {
-      const res = await fetch(`${API_URL}/api/sent/${encodeURIComponent(email)}`);
+      const res = await fetch(`${API_URL}/api/sent/${encodeURIComponent(email)}`, {
+        headers: getAuthHeaders(),
+      });
+      if (res.status === 403) { handleLockedResponse(403); return; }
       const data = await res.json();
       if (data.success) {
         setSentMessages(data.messages);
@@ -228,12 +331,15 @@ function App() {
     } catch (error) {
       console.error('Failed to fetch sent:', error);
     }
-  }, [email]);
+  }, [email, isLocked]);
 
   const fetchForwardingSettings = useCallback(async () => {
     if (!email) return;
     try {
-      const res = await fetch(`${API_URL}/api/forwarding/${encodeURIComponent(email)}`);
+      const res = await fetch(`${API_URL}/api/forwarding/${encodeURIComponent(email)}`, {
+        headers: getAuthHeaders(),
+      });
+      if (res.status === 403) { handleLockedResponse(403); return; }
       const data = await res.json();
       if (data.success) {
         setForwardEnabled(data.forwardEnabled || false);
@@ -242,7 +348,7 @@ function App() {
     } catch (error) {
       console.error('Failed to fetch forwarding settings:', error);
     }
-  }, [email]);
+  }, [email, isLocked]);
 
   const saveForwardingSettings = async () => {
     setForwardingSaving(true);
@@ -251,12 +357,13 @@ function App() {
     try {
       const res = await fetch(`${API_URL}/api/forwarding/${encodeURIComponent(email)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           forwardEnabled,
           forwardTo,
         }),
       });
+      if (res.status === 403) { handleLockedResponse(403); setForwardingSaving(false); return; }
       const data = await res.json();
       if (data.success) {
         setForwardingSuccess(true);
@@ -275,6 +382,7 @@ function App() {
     try {
       const res = await fetch(`${API_URL}/api/refresh/${encodeURIComponent(email)}`, {
         method: 'POST',
+        headers: getAuthHeaders(),
       });
       const data = await res.json();
       if (data.success) {
@@ -307,9 +415,11 @@ function App() {
 
   const deleteMessage = async (messageId) => {
     try {
-      await fetch(`${API_URL}/api/inbox/${encodeURIComponent(email)}/${messageId}`, {
+      const res = await fetch(`${API_URL}/api/inbox/${encodeURIComponent(email)}/${messageId}`, {
         method: 'DELETE',
+        headers: getAuthHeaders(),
       });
+      if (res.status === 403) { handleLockedResponse(403); return; }
       setMessages(msgs => msgs.filter(m => m.id !== messageId));
       if (selectedMessage?.id === messageId) {
         setSelectedMessage(null);
@@ -324,13 +434,14 @@ function App() {
     try {
       const res = await fetch(`${API_URL}/api/spam-feedback`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           email,
           messageId,
           isSpam: isActuallySpam,
         }),
       });
+      if (res.status === 403) { handleLockedResponse(403); return; }
       const data = await res.json();
       if (data.success) {
         // Update the message in state to show feedback was submitted
@@ -367,9 +478,15 @@ function App() {
     // Release the old email handle first
     if (email) {
       try {
+        const unlocked = getUnlockedEmails();
+        const token = unlocked[email];
+        const headers = token ? { 'X-Unlock-Token': token } : {};
         await fetch(`${API_URL}/api/email/${encodeURIComponent(email)}`, {
           method: 'DELETE',
+          headers,
         });
+        delete unlocked[email];
+        localStorage.setItem('unlockedEmails', JSON.stringify(unlocked));
       } catch (error) {
         console.error('Failed to release email:', error);
       }
@@ -380,22 +497,156 @@ function App() {
     setSentMessages([]);
     setSelectedMessage(null);
     setActiveTab('inbox');
+    setIsLocked(false);
     localStorage.removeItem('tempEmail');
     localStorage.removeItem('tempEmailExpiry');
+  };
+
+  const lockEmail = async () => {
+    const pin = getPinValue(lockPinDigits);
+    const confirm = getPinValue(lockConfirmDigits);
+    if (pin.length !== 6) {
+      setLockError('Enter all 6 digits');
+      return;
+    }
+    if (pin !== confirm) {
+      setLockError('PINs do not match');
+      return;
+    }
+    setLocking(true);
+    setLockError('');
+    try {
+      const res = await fetch(`${API_URL}/api/lock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, pin }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        const unlocked = getUnlockedEmails();
+        unlocked[email] = data.unlockToken;
+        localStorage.setItem('unlockedEmails', JSON.stringify(unlocked));
+        setIsLocked(true);
+        setShowLockModal(false);
+        setLockPinDigits(['', '', '', '', '', '']);
+        setLockConfirmDigits(['', '', '', '', '', '']);
+        setActivePinField('pin');
+      } else {
+        setLockError(data.error || 'Failed to lock email');
+      }
+    } catch (error) {
+      console.error('Failed to lock email:', error);
+      setLockError('Failed to lock email');
+    }
+    setLocking(false);
+  };
+
+  const unlockEmail = async () => {
+    const pin = unlockPinDigits.join('');
+    if (!pin || pin.length !== 6) {
+      setUnlockError('Enter a 6-digit PIN');
+      return;
+    }
+    setUnlocking(true);
+    setUnlockError('');
+    try {
+      const cleanEmail = unlockEmailInput.includes('@')
+        ? unlockEmailInput.toLowerCase().trim()
+        : `${unlockEmailInput.toLowerCase().trim()}@stepmail.tech`;
+      const res = await fetch(`${API_URL}/api/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: cleanEmail, pin }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        const unlocked = getUnlockedEmails();
+        unlocked[data.email] = data.unlockToken;
+        localStorage.setItem('unlockedEmails', JSON.stringify(unlocked));
+        localStorage.setItem('tempEmail', data.email);
+        localStorage.setItem('tempEmailExpiry', 'permanent');
+        setEmail(data.email);
+        setIsLocked(true);
+        setTtl(-1);
+        setMessages([]);
+        setSentMessages([]);
+        setSelectedMessage(null);
+        setUnlockPinDigits(['', '', '', '', '', '']);
+        setUnlockError('');
+      } else {
+        setUnlockError(data.error || 'Failed to unlock');
+      }
+    } catch (error) {
+      console.error('Failed to unlock email:', error);
+      setUnlockError('Failed to unlock email');
+    }
+    setUnlocking(false);
   };
 
   useEffect(() => {
     const savedEmail = localStorage.getItem('tempEmail');
     const savedExpiry = localStorage.getItem('tempEmailExpiry');
     if (savedEmail && savedExpiry) {
-      if (savedExpiry === 'permanent') {
-        setEmail(savedEmail);
-        setTtl(-1); // permanent
-      } else if (Date.now() < parseInt(savedExpiry)) {
-        setEmail(savedEmail);
-        setTtl(Math.floor((parseInt(savedExpiry) - Date.now()) / 1000));
-      }
+      const unlocked = getUnlockedEmails();
+      const token = unlocked[savedEmail];
+      const restoreWithLockCheck = async () => {
+        try {
+          const res = await fetch(`${API_URL}/api/verify-unlock`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: savedEmail }),
+          });
+          const data = await res.json();
+          if (data.success && data.isLocked) {
+            if (token) {
+              // Has valid unlock token, restore with lock
+              setEmail(savedEmail);
+              setIsLocked(true);
+              setTtl(savedExpiry === 'permanent' ? -1 : Math.floor((parseInt(savedExpiry) - Date.now()) / 1000));
+            } else {
+              // Locked but no token - redirect to unlock tab
+              setLandingTab('unlock');
+              setUnlockEmailInput(savedEmail);
+            }
+          } else {
+            // Not locked, restore normally
+            if (savedExpiry === 'permanent') {
+              setEmail(savedEmail);
+              setTtl(-1);
+            } else if (Date.now() < parseInt(savedExpiry)) {
+              setEmail(savedEmail);
+              setTtl(Math.floor((parseInt(savedExpiry) - Date.now()) / 1000));
+            }
+          }
+        } catch {
+          // Fallback: restore normally if verify endpoint fails
+          if (savedExpiry === 'permanent') {
+            setEmail(savedEmail);
+            setTtl(-1);
+          } else if (Date.now() < parseInt(savedExpiry)) {
+            setEmail(savedEmail);
+            setTtl(Math.floor((parseInt(savedExpiry) - Date.now()) / 1000));
+          }
+        }
+      };
+      restoreWithLockCheck();
     }
+  }, []);
+
+  // Poll service status
+  useEffect(() => {
+    const checkServiceStatus = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/service-status`);
+        const data = await res.json();
+        if (data.status) setServiceStatus(data.status);
+      } catch (e) {
+        setServiceStatus('off');
+      }
+    };
+    checkServiceStatus();
+    const interval = setInterval(checkServiceStatus, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -403,12 +654,15 @@ function App() {
     fetchInbox();
     fetchSent();
     fetchForwardingSettings();
-    const interval = setInterval(() => {
-      fetchInbox();
-      fetchSent();
-    }, 3000);
-    return () => clearInterval(interval);
   }, [email, fetchInbox, fetchSent, fetchForwardingSettings]);
+
+  // WebSocket for real-time new email notifications
+  const { newEmails: wsNewEmails } = useUserWebSocket(email);
+  useEffect(() => {
+    if (wsNewEmails.length > 0) {
+      fetchInbox();
+    }
+  }, [wsNewEmails, fetchInbox]);
 
   useEffect(() => {
     // Don't run countdown for permanent emails (ttl === -1)
@@ -461,48 +715,91 @@ function App() {
     return { local, domain };
   };
 
+  const getMessageText = (message) => {
+    if (!message) return '';
+    return message.text || message.html?.replace(/<[^>]+>/g, ' ') || '';
+  };
+
+  const filteredInboxMessages = useMemo(() => {
+    const query = mailSearch.trim().toLowerCase();
+    if (!query) return messages;
+    return messages.filter((msg) => [
+      msg.from,
+      msg.subject,
+      getMessageText(msg),
+      msg.spam?.isSpam ? 'spam' : '',
+      msg.forwarded ? 'forwarded' : '',
+    ].join(' ').toLowerCase().includes(query));
+  }, [messages, mailSearch]);
+
+  const filteredSentMessages = useMemo(() => {
+    const query = mailSearch.trim().toLowerCase();
+    if (!query) return sentMessages;
+    return sentMessages.filter((msg) => [
+      msg.to,
+      msg.subject,
+      getMessageText(msg),
+    ].join(' ').toLowerCase().includes(query));
+  }, [sentMessages, mailSearch]);
+
+  const currentMessages = activeTab === 'inbox' ? messages : sentMessages;
+  const currentFilteredMessages = activeTab === 'inbox' ? filteredInboxMessages : filteredSentMessages;
+
+  const copySelectedMessage = async () => {
+    if (!selectedMessage) return;
+    const text = [
+      selectedMessage.subject || '(No Subject)',
+      selectedMessage.isSent ? `To: ${selectedMessage.to}` : `From: ${selectedMessage.from}`,
+      `Date: ${new Date(selectedMessage.date).toLocaleString()}`,
+      '',
+      getMessageText(selectedMessage),
+    ].join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessageCopied(true);
+      setTimeout(() => setMessageCopied(false), 1800);
+    } catch (error) {
+      console.error('Failed to copy message:', error);
+    }
+  };
+
+  const downloadSelectedMessage = () => {
+    if (!selectedMessage) return;
+    const text = [
+      `Subject: ${selectedMessage.subject || '(No Subject)'}`,
+      selectedMessage.isSent ? `To: ${selectedMessage.to}` : `From: ${selectedMessage.from}`,
+      `Date: ${new Date(selectedMessage.date).toLocaleString()}`,
+      '',
+      getMessageText(selectedMessage),
+    ].join('\n');
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${selectedMessage.subject || 'stepmail-message'}.txt`.replace(/[^\w.-]+/g, '-');
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="app">
       {/* Top Bar with Logo and Active Handles */}
       <div className="top-bar">
-        <div className="logo">
-          <div className="logo-icon">
-            <svg viewBox="0 0 512 512" fill="none">
-              <circle fill="#EEEDF2" cx="255.4" cy="256" r="215.6" />
-              <circle fill="#434765" cx="375.5" cy="214.3" r="35" />
-              <path fill="#32b4f5" stroke="#494a5b" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" d="M406.9,292.5v152.6c0,14.1-11.4,25.5-25.5,25.5h-252c-14.1,0-25.5-11.4-25.5-25.5V292.5c0-2.7,0.5-5.4,1.6-7.9c1.1-2.7,2.7-5.2,4.9-7.2l122.5-116.9c12.6-12,32.4-12,45.1,0l122.5,116.9c2.2,2.1,3.8,4.5,4.9,7.2C406.3,287.1,406.9,289.8,406.9,292.5z" />
-              <path fill="none" stroke="#494a5b" strokeWidth="6" strokeLinejoin="round" d="M405.3,284.7l-43.6,29.4l-69.5,46.8c-22.2,15-51.3,15-73.6,0l-69.5-46.8l-43.6-29.4" />
-              <path fill="#FFFFFF" stroke="#494a5b" strokeWidth="6" strokeLinejoin="round" d="M361.7,270.8v43.3l-80.5,54.2c-15.6,10.5-35.9,10.5-51.5,0l-80.5-54.2v-43.3c0-1.9,1.5-3.4,3.4-3.4h205.7C360.1,267.3,361.7,268.9,361.7,270.8z" />
-              <line stroke="#494a5b" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" x1="202.3" x2="308.5" y1="330.4" y2="330.4" />
-              <line stroke="#494a5b" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" x1="202.3" x2="308.5" y1="315.7" y2="315.7" />
-              <line stroke="#494a5b" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" x1="202.3" x2="308.5" y1="300.9" y2="300.9" />
-              <circle opacity="0.4" fill="#FFFFFF" cx="361.7" cy="205.5" r="35" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="426.6" x2="418.2" y1="169.6" y2="174.7" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="432" x2="423.3" y1="183.6" y2="183.8" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="411.5" x2="415.3" y1="166.6" y2="158.1" />
-              <circle fill="#434765" cx="331.4" cy="128" r="35" />
-              <circle fill="#79CAA1" stroke="#494a5b" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" cx="317.1" cy="117.2" r="35" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="308.1" x2="306.4" y1="56.8" y2="65.3" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="293.2" x2="296.5" y1="59.3" y2="68.6" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="287.3" x2="279.7" y1="73.5" y2="68" />
-              <circle fill="#434765" cx="237.3" cy="105.5" r="35" />
-              <circle fill="#F0C330" stroke="#494a5b" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" cx="220.4" cy="98.3" r="35" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="172" x2="166.3" y1="124.9" y2="132.3" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="158" x2="167.3" y1="118.6" y2="115.5" />
-              <line stroke="#FFFFFF" strokeWidth="7" strokeLinecap="round" x1="155.9" x2="164.4" y1="103.6" y2="105.5" />
-            </svg>
-          </div>
-          <div className="logo-text">
-            <h1>StepMail</h1>
-            <span>by stepmail.com</span>
-          </div>
+        <div className="logo-text">
+          <h1>StepMail</h1>
         </div>
       </div>
 
-      {/* Background gradient orbs */}
-      <div className="bg-orb bg-orb-1"></div>
-      <div className="bg-orb bg-orb-2"></div>
-      <div className="bg-orb bg-orb-3"></div>
+      {serviceStatus === 'off' && (
+        <div className="service-unavailable-banner">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span>Service is currently unavailable. Please try again later.</span>
+        </div>
+      )}
 
       <div className="container">
 
@@ -511,37 +808,24 @@ function App() {
             <div className="hero">
               <div className="hero-content">
                 <h2>Instant Disposable Email</h2>
-                <p>Your private email address that stays forever</p>
 
-                <div className="features">
-                  <div className="feature">
-                    <span className="feature-icon">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                      </svg>
-                    </span>
-                    <span>Instant</span>
-                  </div>
-                  <div className="feature">
-                    <span className="feature-icon">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                        <path d="M9 12l2 2 4-4" />
-                      </svg>
-                    </span>
-                    <span>Private</span>
-                  </div>
-                  <div className="feature">
-                    <span className="feature-icon">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M18.178 8c5.096 0 5.096 8 0 8-5.095 0-7.133-8-12.739-8-4.585 0-4.585 8 0 8 5.606 0 7.644-8 12.74-8z" />
-                      </svg>
-                    </span>
-                    <span>Forever</span>
-                  </div>
+                {/* Tab selector */}
+                <div className="landing-tabs">
+                  <button
+                    className={`tab-btn ${landingTab === 'new' ? 'active' : ''}`}
+                    onClick={() => setLandingTab('new')}
+                  >
+                    New Email
+                  </button>
+                  <button
+                    className={`tab-btn ${landingTab === 'unlock' ? 'active' : ''}`}
+                    onClick={() => setLandingTab('unlock')}
+                  >
+                    Unlock Email
+                  </button>
                 </div>
 
-                {
+                {landingTab === 'new' ? (
                   <div className="custom-email-form">
                     <div className="custom-input-row">
                       <div className="custom-input-wrapper">
@@ -586,23 +870,97 @@ function App() {
                       </button>
                     </div>
                   </div>
-                }
+                ) : (
+                  <div className="unlock-form">
+                    <div className="unlock-input-row">
+                      <div className="unlock-input-wrapper">
+                        <input
+                          type="text"
+                          value={unlockEmailInput}
+                          onChange={(e) => { setUnlockEmailInput(e.target.value); setUnlockError(''); }}
+                          placeholder="you@stepmail.tech"
+                          className="unlock-input"
+                        />
+                      </div>
+                    </div>
+                    <div className="pin-input-row">
+                      <div className="otp-fields">
+                        {unlockPinDigits.map((digit, i) => (
+                          <input
+                            key={`unlock-pin-${i}`}
+                            id={`unlock-pin-${i}`}
+                            type="text"
+                            inputMode="numeric"
+                            maxLength={1}
+                            value={digit}
+                            onChange={(e) => {
+                              const d = e.target.value.replace(/\D/g, '').slice(-1);
+                              setUnlockPinDigits(prev => { const n = [...prev]; n[i] = d; return n; });
+                              setUnlockError('');
+                              if (d && i < 5) document.getElementById(`unlock-pin-${i + 1}`)?.focus();
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Backspace' && !unlockPinDigits[i] && i > 0) {
+                                document.getElementById(`unlock-pin-${i - 1}`)?.focus();
+                              }
+                            }}
+                            onPaste={(e) => {
+                              e.preventDefault();
+                              const pasted = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '').slice(0, 6);
+                              if (!pasted) return;
+                              setUnlockPinDigits(prev => {
+                                const next = [...prev];
+                                for (let j = 0; j < pasted.length && i + j < 6; j++) { next[i + j] = pasted[j]; }
+                                return next;
+                              });
+                              setUnlockError('');
+                              const focusIdx = Math.min(i + pasted.length, 5);
+                              document.getElementById(`unlock-pin-${focusIdx}`)?.focus();
+                            }}
+                            className="otp-field"
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    {unlockError && <div className="custom-error">{unlockError}</div>}
+
+                    <div className="custom-actions">
+                      <button
+                        className="create-btn"
+                        onClick={unlockEmail}
+                        disabled={unlocking || unlockPinDigits.filter(d => d !== '').length !== 6 || !unlockEmailInput}
+                      >
+                        {unlocking ? (
+                          <span className="loading-spinner"></span>
+                        ) : (
+                          <>
+                            <span>Unlock</span>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                              <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+                            </svg>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           ) : (
             <div className="inbox-view">
               {/* Email Card */}
               <div className="email-card">
-                <div className="email-card-header">
-                  <div className="timer-badge permanent">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M18.178 8c5.096 0 5.096 8 0 8-5.095 0-7.133-8-12.739-8-4.585 0-4.585 8 0 8 5.606 0 7.644-8 12.74-8z" />
-                    </svg>
-                    <span>Active · Forever</span>
-                  </div>
-                </div>
+                <div className="email-card-header"></div>
 
                 <div className="email-address-display">
+                  {isLocked && (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#79CAA1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{flexShrink:0}}>
+                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                    </svg>
+                  )}
                   <span className="email-local">{getEmailParts(email).local}</span>
                   <span className="email-at">@</span>
                   <span className="email-domain">{getEmailParts(email).domain}</span>
@@ -633,6 +991,29 @@ function App() {
                     </svg>
                     <span>New</span>
                   </button>
+                  <button
+                    className="action-btn lock-btn"
+                    onClick={() => {
+                      if (isLocked) {
+                        setShowLockModal(true);
+                      } else {
+                        setShowLockModal(true);
+                      }
+                    }}
+                  >
+                    {isLocked ? (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                      </svg>
+                    ) : (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+                      </svg>
+                    )}
+                    <span>{isLocked ? 'Locked' : 'Lock'}</span>
+                  </button>
                   <button className="action-btn compose-btn" onClick={() => setShowCompose(true)}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -648,6 +1029,7 @@ function App() {
                     <span>Forward</span>
                   </button>
                 </div>
+
               </div>
 
               {/* Inbox */}
@@ -678,6 +1060,31 @@ function App() {
                     </button>
                   </div>
 
+                  <div className="mail-tools">
+                    <div className="mail-search">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="11" cy="11" r="8" />
+                        <path d="M21 21l-4.35-4.35" />
+                      </svg>
+                      <input
+                        type="search"
+                        value={mailSearch}
+                        onChange={(e) => setMailSearch(e.target.value)}
+                        placeholder={`Search ${activeTab}`}
+                      />
+                      {mailSearch && (
+                        <button type="button" onClick={() => setMailSearch('')} aria-label="Clear search">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M18 6 6 18M6 6l12 12" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                    <div className="mail-result-count">
+                      {currentFilteredMessages.length} of {currentMessages.length}
+                    </div>
+                  </div>
+
                   {activeTab === 'inbox' ? (
                     messages.length === 0 ? (
                       <div className="empty-inbox">
@@ -694,9 +1101,14 @@ function App() {
                           Listening for new mail…
                         </div>
                       </div>
+                    ) : filteredInboxMessages.length === 0 ? (
+                      <div className="empty-inbox compact">
+                        <p>No matches</p>
+                        <span>Try sender, subject, spam, forwarded, or message text</span>
+                      </div>
                     ) : (
                       <ul className="message-list">
-                        {messages.map((msg) => (
+                        {filteredInboxMessages.map((msg) => (
                           <li
                             key={msg.id}
                             className={`message-item ${selectedMessage?.id === msg.id ? 'selected' : ''} ${msg.spam?.isSpam ? 'spam' : ''}`}
@@ -729,9 +1141,14 @@ function App() {
                         <p>No sent emails</p>
                         <span>Messages you send will appear here</span>
                       </div>
+                    ) : filteredSentMessages.length === 0 ? (
+                      <div className="empty-inbox compact">
+                        <p>No matches</p>
+                        <span>Try recipient, subject, or message text</span>
+                      </div>
                     ) : (
                       <ul className="message-list">
-                        {sentMessages.map((msg) => (
+                        {filteredSentMessages.map((msg) => (
                           <li
                             key={msg.id}
                             className={`message-item ${selectedMessage?.id === msg.id ? 'selected' : ''}`}
@@ -806,14 +1223,35 @@ function App() {
                             </div>
                           )}
                         </div>
-                        {!selectedMessage.isSent && (
-                          <button className="delete-btn" onClick={() => deleteMessage(selectedMessage.id)}>
+                        <div className="reader-actions">
+                          <button className="reader-tool-btn" onClick={copySelectedMessage} title="Copy message">
+                            {messageCopied ? (
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            ) : (
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <rect x="9" y="9" width="13" height="13" rx="2" />
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                              </svg>
+                            )}
+                          </button>
+                          <button className="reader-tool-btn" onClick={downloadSelectedMessage} title="Download message">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <polyline points="3 6 5 6 21 6" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                              <polyline points="7 10 12 15 17 10" />
+                              <line x1="12" y1="15" x2="12" y2="3" />
                             </svg>
                           </button>
-                        )}
+                          {!selectedMessage.isSent && (
+                            <button className="delete-btn" onClick={() => deleteMessage(selectedMessage.id)} title="Delete message">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <polyline points="3 6 5 6 21 6" />
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
                       </div>
                       {/* Attachments */}
                       {selectedMessage.attachments && selectedMessage.attachments.length > 0 && (
@@ -1072,6 +1510,85 @@ function App() {
                   <span>Save Settings</span>
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lock Modal */}
+      {showLockModal && (
+        <div className="compose-overlay" onClick={() => { setShowLockModal(false); setLockError(''); setLockPinDigits(['','','','','','']); setLockConfirmDigits(['','','','','','']); setActivePinField('pin'); }}>
+          <div className="compose-modal lock-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="compose-header">
+              <h3>{isLocked ? 'Email Locked' : 'Lock Email'}</h3>
+              <button className="compose-close" onClick={() => { setShowLockModal(false); setLockError(''); setLockPinDigits(['','','','','','']); setLockConfirmDigits(['','','','','','']); setActivePinField('pin'); }}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="compose-body">
+              {isLocked ? (
+                <p className="forwarding-description">This email is currently locked. You can continue using it normally. To unlock from another device, use the "Unlock Email" tab on the landing page.</p>
+              ) : (
+                <>
+                  <p className="forwarding-description">Set a 6-digit PIN to lock this email. You will need this PIN to access the email from other devices or browsers.</p>
+
+                  <div className="lock-pin-section">
+                    <p className="pin-label">Set PIN</p>
+                    <div className="otp-fields">
+                      {lockPinDigits.map((digit, i) => (
+                        <input
+                          key={`pin-${i}`}
+                          id={`pin-${i}`}
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={1}
+                          value={digit}
+                          onChange={(e) => handlePinDigit('pin', i, e.target.value)}
+                          onKeyDown={(e) => handlePinKeyDown('pin', i, e)}
+                          onPaste={(e) => handlePinPaste('pin', i, e)}
+                          className="otp-field"
+                          onFocus={() => setActivePinField('pin')}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="lock-pin-section">
+                    <p className="pin-label">Confirm PIN</p>
+                    <div className="otp-fields">
+                      {lockConfirmDigits.map((digit, i) => (
+                        <input
+                          key={`confirm-${i}`}
+                          id={`confirm-${i}`}
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={1}
+                          value={digit}
+                          onChange={(e) => handlePinDigit('confirm', i, e.target.value)}
+                          onKeyDown={(e) => handlePinKeyDown('confirm', i, e)}
+                          onPaste={(e) => handlePinPaste('confirm', i, e)}
+                          className="otp-field"
+                          onFocus={() => setActivePinField('confirm')}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {lockError && <div className="custom-error">{lockError}</div>}
+                </>
+              )}
+
+              <div className="compose-actions" style={{justifyContent:'center', marginTop:'8px'}}>
+                {!isLocked && (
+                  <button className="create-btn" onClick={lockEmail} disabled={locking || getPinValue(lockPinDigits).length !== 6 || getPinValue(lockConfirmDigits).length !== 6}>
+                    {locking ? <span className="loading-spinner"></span> : <span>Lock Email</span>}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

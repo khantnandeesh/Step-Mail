@@ -21,6 +21,7 @@
     "mailparser": "^3.6.6",
     "nanoid": "^3.3.7",
     "resend": "^4.0.0",
-    "smtp-server": "^3.13.2"
+    "smtp-server": "^3.13.2",
+    "ws": "^8.18.0"
   }
 }

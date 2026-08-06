@@ -1,1 +1,52 @@
-@import "tailwindcss";
+/* ============================================================
+   STEPMAIL :: GLOBAL STYLES
+   Classic Hotmail / Outlook Express. Tahoma, bevels, no glass.
+   Fixed-height desktop layout: only internal mail panes scroll.
+   ============================================================ */
+
+:root {
+  font-family: "Tahoma", Verdana, Arial, Helvetica, sans-serif;
+  line-height: 1.35;
+  font-weight: 400;
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background-color: #d6d5d1;
+  color: #000000;
+  font-family: "Tahoma", Verdana, Arial, Helvetica, sans-serif;
+  font-size: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The React app fills the whole viewport; the page itself never scrolls,
+   only the internal mail list / reading pane scroll. */
+#root {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Default old-style links: blue + underlined */
+a {
+  color: #0000ee;
+  text-decoration: underline;
+}
+a:visited {
+  color: #551a8b;
+}
+a:active {
+  color: #ff0000;
+}

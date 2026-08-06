@@ -1,12 +1,71 @@
 const os = require("os");
+const fs = require("fs");
+const { DEFAULTS } = require("../middlewares/rateLimit");
 
-function createAdminController({
-  config,
-  redis,
-  addLog,
-  getLogs,
-  getClientIP,
-}) {
+const MAX_HISTORY = 60;
+const cpuHistory = [];
+
+// Accurate CPU usage tracking via /proc/stat deltas
+let prevCpuTimes = null;
+
+function getCpuUsageFromProcStat() {
+  try {
+    const stat = fs.readFileSync("/proc/stat", "utf8");
+    const line = stat.split("\n").find((l) => l.startsWith("cpu "));
+    if (!line) return null;
+    const fields = line.trim().split(/\s+/).slice(1).map(Number);
+    // fields: user, nice, system, idle, iowait, irq, softirq, steal
+    const total = fields.reduce((a, b) => a + b, 0);
+    const idle = fields[3] + (fields[4] || 0); // idle + iowait
+    return { total, idle };
+  } catch {
+    return null;
+  }
+}
+
+function getCpuPercentage() {
+  const curr = getCpuUsageFromProcStat();
+  if (!curr) {
+    // Fallback: use os.loadavg but cap more reasonably
+    const cpus = os.cpus();
+    const loadAvg = os.loadavg();
+    return Math.min(100, (loadAvg[0] / Math.max(cpus.length, 1)) * 100);
+  }
+
+  if (!prevCpuTimes) {
+    prevCpuTimes = curr;
+    return 0; // First reading has no delta
+  }
+
+  const totalDiff = curr.total - prevCpuTimes.total;
+  const idleDiff = curr.idle - prevCpuTimes.idle;
+  prevCpuTimes = curr;
+
+  if (totalDiff === 0) return 0;
+  return ((totalDiff - idleDiff) / totalDiff) * 100;
+}
+
+function createAdminController({ config, redis, addLog, getLogs, getClientIP, listAllRateLimits, resetRateLimitsForIP }) {
+  const recordCpuHistory = () => {
+    const percentage = getCpuPercentage();
+
+    cpuHistory.push({
+      timestamp: Date.now(),
+      percentage: parseFloat(percentage.toFixed(1)),
+    });
+
+    if (cpuHistory.length > MAX_HISTORY) {
+      cpuHistory.shift();
+    }
+  };
+
+  setInterval(recordCpuHistory, 2000);
+  recordCpuHistory();
+
+  const getCpuHistory = () => {
+    return cpuHistory.slice();
+  };
+
   const authenticate = (req, res) => {
     const { password } = req.body;
 
@@ -26,7 +85,7 @@ function createAdminController({
       const totalMem = os.totalmem();
       const freeMem = os.freemem();
       const usedMem = totalMem - freeMem;
-      const cpuPercentage = Math.min(100, (loadAvg[0] / cpus.length) * 100);
+      const cpuPercentage = getCpuPercentage();
 
       let handleCount = 0;
       let permanentCount = 0;
@@ -34,16 +93,8 @@ function createAdminController({
       let cursor = "0";
 
       do {
-        const [nextCursor, keys] = await redis.scan(
-          cursor,
-          "MATCH",
-          "email:*@*",
-          "COUNT",
-          1000,
-        );
-        const emailKeys = keys.filter(
-          (k) => !k.includes(":inbox:") && !k.includes(":sent:"),
-        );
+        const [nextCursor, keys] = await redis.scan(cursor, "MATCH", "email:*@*", "COUNT", 1000);
+        const emailKeys = keys.filter((k) => !k.includes(":inbox:") && !k.includes(":sent:"));
 
         if (emailKeys.length > 0) {
           const pipeline = redis.pipeline();
@@ -65,13 +116,7 @@ function createAdminController({
       let rateLimitedIPs = 0;
       cursor = "0";
       do {
-        const [nextCursor, keys] = await redis.scan(
-          cursor,
-          "MATCH",
-          "ratelimit:*",
-          "COUNT",
-          100,
-        );
+        const [nextCursor, keys] = await redis.scan(cursor, "MATCH", "ratelimit:*", "COUNT", 100);
         rateLimitedIPs += keys.length;
         cursor = nextCursor;
       } while (cursor !== "0");
@@ -79,9 +124,7 @@ function createAdminController({
       const redisInfo = await redis.info();
       const usedMemoryMatch = redisInfo.match(/used_memory_human:(\S+)/);
       const connectedClientsMatch = redisInfo.match(/connected_clients:(\d+)/);
-      const totalConnectionsMatch = redisInfo.match(
-        /total_connections_received:(\d+)/,
-      );
+      const totalConnectionsMatch = redisInfo.match(/total_connections_received:(\d+)/);
 
       res.json({
         success: true,
@@ -106,9 +149,7 @@ function createAdminController({
         },
         redis: {
           memory: usedMemoryMatch ? usedMemoryMatch[1] : "N/A",
-          clients: connectedClientsMatch
-            ? parseInt(connectedClientsMatch[1], 10)
-            : 0,
+          clients: connectedClientsMatch ? parseInt(connectedClientsMatch[1], 10) : 0,
           totalConnections: totalConnectionsMatch
             ? parseInt(totalConnectionsMatch[1], 10)
             : 0,
@@ -129,6 +170,86 @@ function createAdminController({
     }
   };
 
+  const getServiceStatus = async (req, res) => {
+    try {
+      const status = await redis.get("service:status") || "on";
+      res.json({ success: true, status });
+    } catch (error) {
+      res.status(500).json({ success: false, error: "Failed to get service status" });
+    }
+  };
+
+  const setServiceStatus = async (req, res) => {
+    try {
+      const { status } = req.body;
+      if (status !== "on" && status !== "off") {
+        return res.status(400).json({ success: false, error: "Status must be 'on' or 'off'" });
+      }
+      await redis.set("service:status", status);
+      addLog("info", `Admin set service status to: ${status}`, { ip: getClientIP(req) });
+      res.json({ success: true, status });
+    } catch (error) {
+      res.status(500).json({ success: false, error: "Failed to set service status" });
+    }
+  };
+
+  const listRateLimits = async (req, res) => {
+    try {
+      const limits = await listAllRateLimits();
+      res.json({ success: true, limits });
+    } catch (error) {
+      console.error("Error listing rate limits:", error);
+      res.status(500).json({ success: false, error: "Failed to list rate limits" });
+    }
+  };
+
+  const resetRateLimits = async (req, res) => {
+    try {
+      const ip = decodeURIComponent(req.params.ip);
+      const deleted = await resetRateLimitsForIP(ip);
+      addLog("info", `Admin reset rate limits for IP: ${ip}`, { deletedKeys: deleted, ip: getClientIP(req) });
+      res.json({ success: true, deleted });
+    } catch (error) {
+      console.error("Error resetting rate limits:", error);
+      res.status(500).json({ success: false, error: "Failed to reset rate limits" });
+    }
+  };
+
+  const getRateLimitConfig = async (req, res) => {
+    try {
+      const configStr = await redis.get("ratelimit:config");
+      const current = configStr ? JSON.parse(configStr) : DEFAULTS;
+      res.json({ success: true, defaults: DEFAULTS, current });
+    } catch (error) {
+      res.status(500).json({ success: false, error: "Failed to get rate limit config" });
+    }
+  };
+
+  const setRateLimitConfig = async (req, res) => {
+    try {
+      // Get existing config first
+      const existingStr = await redis.get("ratelimit:config");
+      const existing = existingStr ? JSON.parse(existingStr) : {};
+
+      const { general, create: createLimit, send } = req.body;
+      const newConfig = { ...existing }; // preserve existing values
+
+      for (const [name, value] of Object.entries({ general, create: createLimit, send })) {
+        if (value && typeof value.max === "number" && typeof value.window === "number") {
+          if (value.max > 0 && value.window > 0 && value.max <= 10000 && value.window <= 86400) {
+            newConfig[name] = { max: Math.round(value.max), window: Math.round(value.window) };
+          }
+        }
+      }
+
+      await redis.set("ratelimit:config", JSON.stringify(newConfig));
+      addLog("info", "Admin updated rate limit config", { config: newConfig, ip: getClientIP(req) });
+      res.json({ success: true, config: newConfig });
+    } catch (error) {
+      res.status(500).json({ success: false, error: "Failed to update rate limit config" });
+    }
+  };
+
   const listLogs = (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 100;
     const type = req.query.type;
@@ -146,20 +267,9 @@ function createAdminController({
       const cursor = req.query.cursor || "0";
       const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
 
-      const [nextCursor, keys] = await redis.scan(
-        cursor,
-        "MATCH",
-        "email:*",
-        "COUNT",
-        limit * 2,
-      );
+      const [nextCursor, keys] = await redis.scan(cursor, "MATCH", "email:*", "COUNT", limit * 2);
       const emailKeys = keys
-        .filter(
-          (key) =>
-            key.startsWith("email:") &&
-            !key.includes(":inbox:") &&
-            !key.includes(":sent:"),
-        )
+        .filter((key) => key.startsWith("email:") && !key.includes(":inbox:") && !key.includes(":sent:"))
         .slice(0, limit);
 
       const pipeline = redis.pipeline();
@@ -196,44 +306,37 @@ function createAdminController({
         }
       }
 
-      res.json({
-        success: true,
-        handles,
-        cursor: nextCursor,
-        hasMore: nextCursor !== "0",
-      });
+      res.json({ success: true, handles, cursor: nextCursor, hasMore: nextCursor !== "0" });
     } catch (error) {
       console.error("Error fetching admin handles:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to fetch handles" });
+      res.status(500).json({ success: false, error: "Failed to fetch handles" });
     }
   };
 
   const deleteHandle = async (req, res) => {
     try {
       const email = req.params.email.toLowerCase();
-      const deleted = await redis.del(
-        `email:${email}`,
-        `inbox:${email}`,
-        `sent:${email}`,
-      );
+      const deleted = await redis.del(`email:${email}`, `inbox:${email}`, `sent:${email}`);
 
-      addLog("info", `Admin deleted handle: ${email}`, {
-        deletedKeys: deleted,
-      });
+      addLog("info", `Admin deleted handle: ${email}`, { deletedKeys: deleted });
       res.json({ success: true, deleted });
     } catch (error) {
       console.error("Error deleting handle:", error);
-      res
-        .status(500)
-        .json({ success: false, error: "Failed to delete handle" });
+      res.status(500).json({ success: false, error: "Failed to delete handle" });
     }
   };
 
   return {
     authenticate,
     getStats,
+    getCpuHistory,
+    getCpuPercentage,
+    getServiceStatus,
+    setServiceStatus,
+    listRateLimits,
+    resetRateLimits,
+    getRateLimitConfig,
+    setRateLimitConfig,
     listLogs,
     listHandles,
     deleteHandle,
