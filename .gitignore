@@ -1,0 +1,19 @@
+# Secrets / credentials - never commit
+.env
+.env.*
+!.env.example
+
+# Production artifacts
+certbot/
+certbot-www/
+*.pem
+*.key
+
+# Local infra
+nginx/
+rspamd/
+www/
+node_modules/
+.qoder/
+
+# Build output (dist handled by frontend/.gitignore)
