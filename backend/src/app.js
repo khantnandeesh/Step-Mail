@@ -23,8 +23,8 @@ function createApp() {
   const resend = createResendClient(CONFIG.RESEND_API_KEY);
 
   // Placeholder for WS broadcast function (set from index.js after WS server is created)
-  let broadcastToUser = (email, data) => {};
-  const setBroadcastToUser = (fn) => { broadcastToUser = fn; };
+  const broadcastRef = { fn: () => {} };
+  const setBroadcastToUser = (fn) => { broadcastRef.fn = fn; };
 
   redis.on("connect", () => {
     addLog("info", "Connected to Redis");
@@ -46,7 +46,7 @@ function createApp() {
     resend,
     spamService,
     forwardingService,
-    broadcastToUser,
+    broadcastToUser: (email, data) => broadcastRef.fn(email, data),
   });
 
   const adminController = createAdminController({

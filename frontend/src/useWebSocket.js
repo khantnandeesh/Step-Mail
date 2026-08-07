@@ -102,6 +102,7 @@ export function useUserWebSocket(email) {
     const [ws, setWs] = useState(null);
     const [connected, setConnected] = useState(false);
     const [newEmails, setNewEmails] = useState([]);
+    const [newSentEmails, setNewSentEmails] = useState([]);
     const reconnectTimer = useRef(null);
     const wsRef = useRef(null);
 
@@ -139,6 +140,8 @@ export function useUserWebSocket(email) {
                     const msg = JSON.parse(event.data);
                     if (msg.type === 'new-email') {
                         setNewEmails(prev => [...prev, msg.data]);
+                    } else if (msg.type === 'new-sent') {
+                        setNewSentEmails(prev => [...prev, msg.data]);
                     }
                 } catch (e) {
                     console.error('WS parse error:', e);
@@ -155,8 +158,9 @@ export function useUserWebSocket(email) {
             setWs(null);
             setConnected(false);
             setNewEmails([]);
+            setNewSentEmails([]);
         };
     }, [email]);
 
-    return { ws, connected, newEmails };
+    return { ws, connected, newEmails, newSentEmails };
 }

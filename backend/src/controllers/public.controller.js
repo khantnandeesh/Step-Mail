@@ -289,6 +289,9 @@ function createPublicController({ config, redis, resend, spamService, forwarding
         await redis.expire(sentKey, emailTtl);
       }
 
+      // Notify connected clients that a sent message was added
+      broadcastToUser(fromLower, { type: "new-sent", data: { id: sentEmail.id, to: sentEmail.to, subject: sentEmail.subject, date: sentEmail.date } });
+
       res.json({ success: true, messageId: data.id, message: "Email sent successfully" });
     } catch (error) {
       console.error("Error sending email:", error);

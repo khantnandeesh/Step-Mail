@@ -657,12 +657,17 @@ function App() {
   }, [email, fetchInbox, fetchSent, fetchForwardingSettings]);
 
   // WebSocket for real-time new email notifications
-  const { newEmails: wsNewEmails } = useUserWebSocket(email);
+  const { newEmails: wsNewEmails, newSentEmails: wsNewSentEmails } = useUserWebSocket(email);
   useEffect(() => {
     if (wsNewEmails.length > 0) {
       fetchInbox();
     }
   }, [wsNewEmails, fetchInbox]);
+  useEffect(() => {
+    if (wsNewSentEmails.length > 0) {
+      fetchSent();
+    }
+  }, [wsNewSentEmails, fetchSent]);
 
   useEffect(() => {
     // Don't run countdown for permanent emails (ttl === -1)
