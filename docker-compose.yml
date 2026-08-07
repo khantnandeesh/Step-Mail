@@ -1,0 +1,103 @@
+version: "3.8"
+
+services:
+  # Redis for temporary email storage
+  redis:
+    image: redis:7-alpine
+    container_name: disposable-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - disposable-net
+
+  # Rspamd for spam detection
+  rspamd:
+    image: rspamd/rspamd
+    container_name: disposable-rspamd
+    restart: unless-stopped
+    volumes:
+      - rspamd_data:/var/lib/rspamd
+      - ./rspamd/local.d:/etc/rspamd/local.d:ro
+    depends_on:
+      - redis
+    networks:
+      - disposable-net
+
+  # Node.js Backend (Express API + SMTP Server)
+  backend:
+    build: ./backend
+    container_name: disposable-backend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - EMAIL_DOMAIN=stepmail.tech
+      - REDIS_URL=redis://redis:6379
+      - API_PORT=3001
+      - SMTP_PORT=25
+      - EMAIL_TTL=600
+      - INBOX_TTL=600
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - RSPAMD_URL=http://rspamd:11333
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/workspace
+    ports:
+      - "25:25" # SMTP port - exposed to receive emails
+    depends_on:
+      - redis
+      - rspamd
+    networks:
+      - disposable-net
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        - VITE_API_URL=https://stepmail.tech
+    container_name: disposable-frontend
+    restart: unless-stopped
+    networks:
+      - disposable-net
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: disposable-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:rw
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./www:/var/www:rw
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - disposable-net
+
+  # Certbot for SSL certificates
+  certbot:
+    image: certbot/certbot
+    container_name: disposable-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - disposable-net
+
+networks:
+  disposable-net:
+    driver: bridge
+
+volumes:
+  redis_data:
+  rspamd_data:
