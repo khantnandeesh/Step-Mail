@@ -9,7 +9,7 @@ const ws = createWebSocketServer(httpServer, {
   adminPassword: config.ADMIN_PASSWORD,
   getCpuHistory: () => adminController.getCpuHistory(),
   getCpuPercentage: () => adminController.getCpuPercentage(),
-  listAllRateLimits: adminController.listRateLimits,
+  listAllRateLimits: () => adminController.getRateLimitListData(),
 });
 
 // Wire up WS broadcast to public controller

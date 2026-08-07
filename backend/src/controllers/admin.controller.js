@@ -1,5 +1,6 @@
 const os = require("os");
 const fs = require("fs");
+const { spawn } = require("child_process");
 const { DEFAULTS } = require("../middlewares/rateLimit");
 
 const MAX_HISTORY = 60;
@@ -193,12 +194,18 @@ function createAdminController({ config, redis, addLog, getLogs, getClientIP, li
     }
   };
 
+  const getRateLimitListData = async () => {
+    return listAllRateLimits();
+  };
+
   const listRateLimits = async (req, res) => {
     try {
-      const limits = await listAllRateLimits();
+      const limits = await getRateLimitListData();
+      if (!res) return limits;
       res.json({ success: true, limits });
     } catch (error) {
       console.error("Error listing rate limits:", error);
+      if (!res) throw error;
       res.status(500).json({ success: false, error: "Failed to list rate limits" });
     }
   };
@@ -326,6 +333,30 @@ function createAdminController({ config, redis, addLog, getLogs, getClientIP, li
     }
   };
 
+  const redeploy = async (req, res) => {
+    const scriptPath = "/workspace/deploy.sh";
+    if (!fs.existsSync(scriptPath)) {
+      return res.status(500).json({ success: false, error: "deploy.sh not mounted" });
+    }
+
+    addLog("info", "Admin triggered redeploy");
+
+    // Spawn detached so it survives this container being recreated.
+    const child = spawn("sh", [scriptPath], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    child.on("error", (err) => {
+      console.error("Failed to spawn deploy script:", err.message);
+      addLog("error", "Redeploy spawn failed", { error: err.message });
+    });
+
+    // Brief wait so a startup failure can be reported synchronously.
+    await new Promise((r) => setTimeout(r, 1200));
+    res.json({ success: true, message: "Redeploy started", logDir: "/workspace/deploy-logs" });
+  };
+
   return {
     authenticate,
     getStats,
@@ -334,12 +365,14 @@ function createAdminController({ config, redis, addLog, getLogs, getClientIP, li
     getServiceStatus,
     setServiceStatus,
     listRateLimits,
+    getRateLimitListData,
     resetRateLimits,
     getRateLimitConfig,
     setRateLimitConfig,
     listLogs,
     listHandles,
     deleteHandle,
+    redeploy,
   };
 }
 

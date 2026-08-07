@@ -16,6 +16,9 @@ function createAdminRoutes({ adminController, adminAuth }) {
   router.get("/service-status", adminAuth, adminController.getServiceStatus);
   router.put("/service-status", adminAuth, adminController.setServiceStatus);
 
+  // Redeploy backend + frontend
+  router.post("/redeploy", adminAuth, adminController.redeploy);
+
   // Rate limits per IP
   router.get("/rate-limits", adminAuth, adminController.listRateLimits);
   router.post("/rate-limits/:ip/reset", adminAuth, adminController.resetRateLimits);

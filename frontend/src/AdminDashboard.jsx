@@ -38,6 +38,10 @@ function AdminDashboard() {
     // Service status
     const [serviceStatus, setServiceStatus] = useState('on');
 
+    // Redeploy
+    const [deploying, setDeploying] = useState(false);
+    const [deployMsg, setDeployMsg] = useState('');
+
     // Rate limits per IP
     const [userRateLimits, setUserRateLimits] = useState([]);
     const [rlSearch, setRlSearch] = useState('');
@@ -616,6 +620,32 @@ function AdminDashboard() {
                                 <span className={`status-badge ${serviceStatus === 'on' ? 'status-on' : 'status-off'}`}>
                                     {serviceStatus === 'on' ? 'Online' : 'Offline'}
                                 </span>
+                            </div>
+                            <div className="service-toggle-row" style={{ marginTop: 10 }}>
+                                <button
+                                    className="redeploy-btn"
+                                    disabled={deploying}
+                                    onClick={async () => {
+                                        if (!window.confirm('Rebuild and restart backend + frontend now?')) return;
+                                        setDeploying(true);
+                                        setDeployMsg('');
+                                        try {
+                                            const res = await fetch(`${API_URL}/api/admin/redeploy`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }
+                                            });
+                                            const data = await res.json();
+                                            setDeployMsg(data.success ? 'Redeploy started' : (data.error || 'Failed'));
+                                        } catch (e) {
+                                            setDeployMsg('Redeploy request failed');
+                                        } finally {
+                                            setDeploying(false);
+                                        }
+                                    }}
+                                >
+                                    {deploying ? 'Deploying…' : 'Redeploy'}
+                                </button>
+                                <span className="redeploy-msg">{deployMsg}</span>
                             </div>
                         </div>
 
